@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>Sheet Music Viewer</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #000;
+      font-family: system-ui, sans-serif;
+      touch-action: manipulation;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    #open-screen {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      width: 100%;
+      height: 100%;
+      gap: 24px;
+    }
+    #open-screen h1 { color: #fff; font-size: 24px; }
+    #file-input { display: none; }
+    #open-button {
+      background: #fff; color: #000; border: none;
+      padding: 16px 32px; font-size: 18px; border-radius: 12px;
+      cursor: pointer; min-width: 200px; min-height: 56px;
+    }
+    #open-button:active { background: #ddd; }
+    #viewer {
+      display: none;
+      width: 100%;
+      height: 100%;
+      position: fixed;
+      top: 0; left: 0;
+      background: #000;
+    }
+    #pdf-canvas {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      max-width: 100%;
+      max-height: 100%;
+    }
+    #page-indicator {
+      position: fixed;
+      bottom: 40px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0,0,0,0.7);
+      color: #fff;
+      padding: 8px 16px;
+      border-radius: 20px;
+      font-size: 14px;
+      opacity: 0;
+      transition: opacity 0.3s;
+      pointer-events: none;
+    }
+    #close-btn {
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      background: rgba(0,0,0,0.7);
+      border: none;
+      color: #fff;
+      font-size: 20px;
+      cursor: pointer;
+      opacity: 0;
+      transition: opacity 0.3s;
+      z-index: 100;
+    }
+    #close-btn.visible { opacity: 1; }
+    #close-btn:active { background: rgba(50,50,50,0.7); }
+    #loading {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      color: #fff;
+      font-size: 18px;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="open-screen">
+    <h1>Sheet Music Viewer</h1>
+    <input type="file" id="file-input" accept=".pdf">
+    <button id="open-button">Open PDF</button>
+  </div>
+
+  <div id="viewer">
+    <canvas id="pdf-canvas"></canvas>
+  </div>
+
+  <button id="close-btn" title="Close">X</button>
+
+  <div id="page-indicator"></div>
+  <div id="loading">Loading...</div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script>
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+    const fileInput = document.getElementById('file-input');
+    const openButton = document.getElementById('open-button');
+    const openScreen = document.getElementById('open-screen');
+    const viewer = document.getElementById('viewer');
+    const canvas = document.getElementById('pdf-canvas');
+    const ctx = canvas.getContext('2d');
+    const pageIndicator = document.getElementById('page-indicator');
+    const loading = document.getElementById('loading');
+
+    let pdfDoc = null;
+    let currentPage = 1;
+    let totalPages = 0;
+    let renderTask = null;
+
+    async function renderPage(pageNum) {
+      if (!pdfDoc) return;
+
+      if (renderTask) {
+        renderTask.cancel();
+        renderTask = null;
+      }
+
+      try {
+        const page = await pdfDoc.getPage(pageNum);
+        
+        const defaultViewport = page.getViewport({ scale: 1 });
+        const scaleX = window.innerWidth / defaultViewport.width;
+        const scaleY = window.innerHeight / defaultViewport.height;
+        const scale = Math.min(scaleX, scaleY, 2);
+
+        const viewport = page.getViewport({ scale });
+
+        canvas.width = Math.floor(viewport.width);
+        canvas.height = Math.floor(viewport.height);
+        canvas.style.width = Math.floor(viewport.width) + 'px';
+        canvas.style.height = Math.floor(viewport.height) + 'px';
+
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        renderTask = page.render({
+          canvasContext: ctx,
+          viewport: viewport
+        });
+
+        await renderTask.promise;
+        renderTask = null;
+      } catch (e) {
+        if (e.name !== 'RenderingCancelledException') {
+          console.error('Render error:', e);
+          alert('Error rendering page: ' + e.message);
+        }
+      }
+    }
+
+    function showIndicator() {
+      pageIndicator.textContent = `Page ${currentPage} of ${totalPages}`;
+      pageIndicator.classList.add('visible');
+      clearTimeout(window.indicatorTimer);
+      window.indicatorTimer = setTimeout(() => {
+        pageIndicator.classList.remove('visible');
+      }, 2000);
+    }
+
+    function nextPage() {
+      if (currentPage < totalPages) {
+        currentPage++;
+        renderPage(currentPage);
+        showIndicator();
+      }
+    }
+
+    function prevPage() {
+      if (currentPage > 1) {
+        currentPage--;
+        renderPage(currentPage);
+        showIndicator();
+      }
+    }
+
+    function handleTap(e) {
+      const x = e.clientX || (e.changedTouches && e.changedTouches[0].clientX);
+      const w = window.innerWidth;
+      if (x < w * 0.2) prevPage();
+      else if (x > w * 0.8) nextPage();
+      else showIndicator();
+    }
+
+    openButton.addEventListener('click', () => fileInput.click());
+
+    fileInput.addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      loading.style.display = 'block';
+      openScreen.style.display = 'none';
+
+      try {
+        const arrayBuffer = await file.arrayBuffer();
+        pdfDoc = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+        totalPages = pdfDoc.numPages;
+        currentPage = 1;
+
+        await renderPage(currentPage);
+        viewer.style.display = 'block';
+        closeBtn.classList.add('visible');
+        showIndicator();
+      } catch (err) {
+        console.error('PDF load error:', err);
+        alert('Error loading PDF: ' + err.message);
+        openScreen.style.display = 'flex';
+      }
+
+      loading.style.display = 'none';
+    });
+
+    let touchStartX = 0;
+    let moved = false;
+
+    canvas.addEventListener('touchstart', e => {
+      if (e.touches.length === 1) {
+        touchStartX = e.touches[0].clientX;
+        moved = false;
+      }
+    }, { passive: true });
+
+    canvas.addEventListener('touchmove', e => {
+      if (e.touches.length === 1 && Math.abs(e.touches[0].clientX - touchStartX) > 10) {
+        moved = true;
+      }
+    }, { passive: true });
+
+    canvas.addEventListener('touchend', e => {
+      if (!moved) handleTap(e);
+    });
+
+    canvas.addEventListener('click', handleTap);
+
+    const closeBtn = document.getElementById('close-btn');
+
+    function showIndicator() {
+      pageIndicator.textContent = `Page ${currentPage} of ${totalPages}`;
+      pageIndicator.classList.add('visible');
+      closeBtn.classList.add('visible');
+      clearTimeout(window.indicatorTimer);
+      window.indicatorTimer = setTimeout(() => {
+        pageIndicator.classList.remove('visible');
+        closeBtn.classList.remove('visible');
+      }, 2000);
+    }
+
+    function closeViewer() {
+      viewer.style.display = 'none';
+      closeBtn.classList.remove('visible');
+      openScreen.style.display = 'flex';
+      pdfDoc = null;
+      canvas.width = 0;
+      canvas.height = 0;
+      fileInput.value = '';
+    }
+
+    closeBtn.addEventListener('click', closeViewer);
+
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Escape' && pdfDoc) {
+        e.preventDefault();
+        closeViewer();
+      }
+      else if (e.key === 'ArrowRight' || e.key === ' ') { e.preventDefault(); nextPage(); }
+      else if (e.key === 'ArrowLeft') { e.preventDefault(); prevPage(); }
+    });
+
+    window.addEventListener('resize', () => {
+      if (pdfDoc) renderPage(currentPage);
+    });
+  </script>
+</body>
+</html>
