@@ -267,6 +267,33 @@
       pendingRenders.clear();
     }
 
+    async function enterFullscreen() {
+      if (document.fullscreenElement || document.webkitFullscreenElement) return;
+
+      const target = document.documentElement;
+      const requestFullscreen = target.requestFullscreen || target.webkitRequestFullscreen;
+      if (!requestFullscreen) return;
+
+      try {
+        await requestFullscreen.call(target);
+      } catch (err) {
+        console.info('Fullscreen request was ignored:', err);
+      }
+    }
+
+    async function exitFullscreen() {
+      if (!document.fullscreenElement && !document.webkitFullscreenElement) return;
+
+      const exit = document.exitFullscreen || document.webkitExitFullscreen;
+      if (!exit) return;
+
+      try {
+        await exit.call(document);
+      } catch (err) {
+        console.info('Fullscreen exit was ignored:', err);
+      }
+    }
+
     async function goToPage(pageNum) {
       if (!pdfDoc || pageNum < 1 || pageNum > totalPages || pageNum === currentPage) return;
 
@@ -309,6 +336,7 @@
 
       loading.style.display = 'block';
       openScreen.style.display = 'none';
+      enterFullscreen();
 
       try {
         const arrayBuffer = await file.arrayBuffer();
@@ -378,6 +406,7 @@
 
     function closeViewer() {
       clearPageCache();
+      exitFullscreen();
       viewer.style.display = 'none';
       closeBtn.classList.remove('visible');
       openScreen.style.display = 'flex';
