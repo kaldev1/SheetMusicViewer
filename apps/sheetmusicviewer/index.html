@@ -49,6 +49,7 @@
       transform: translate(-50%, -50%);
       max-width: 100%;
       max-height: 100%;
+      will-change: contents;
     }
     #page-indicator {
       position: fixed;
@@ -64,6 +65,7 @@
       transition: opacity 0.3s;
       pointer-events: none;
     }
+    #page-indicator.visible { opacity: 1; }
     #close-btn {
       position: fixed;
       top: 20px;
@@ -125,71 +127,169 @@
     let pdfDoc = null;
     let currentPage = 1;
     let totalPages = 0;
-    let renderTask = null;
+    let generation = 0;
+    const pageCache = new Map();
+    const pendingRenders = new Map();
+    const smallScorePageLimit = 8;
+    const maxCachedPages = 12;
 
-    async function renderPage(pageNum) {
-      if (!pdfDoc) return;
+    function getCacheKey(pageNum) {
+      return `${pageNum}:${window.innerWidth}x${window.innerHeight}`;
+    }
 
-      if (renderTask) {
-        renderTask.cancel();
-        renderTask = null;
+    function trimPageCache() {
+      if (totalPages <= smallScorePageLimit) return;
+      if (pageCache.size <= maxCachedPages) return;
+
+      const entries = [...pageCache.entries()]
+        .sort((a, b) => Math.abs(a[1].pageNum - currentPage) - Math.abs(b[1].pageNum - currentPage));
+
+      for (const [key, cached] of entries.slice(maxCachedPages)) {
+        if (cached.source && cached.source.close) cached.source.close();
+        pageCache.delete(key);
       }
+    }
 
-      try {
+    async function renderPageToCache(pageNum) {
+      if (!pdfDoc || pageNum < 1 || pageNum > totalPages) return null;
+
+      const key = getCacheKey(pageNum);
+      if (pageCache.has(key)) return pageCache.get(key);
+      if (pendingRenders.has(key)) return pendingRenders.get(key);
+
+      const renderGeneration = generation;
+      const renderPromise = (async () => {
         const page = await pdfDoc.getPage(pageNum);
-        
+        if (renderGeneration !== generation) return null;
+
         const defaultViewport = page.getViewport({ scale: 1 });
         const scaleX = window.innerWidth / defaultViewport.width;
         const scaleY = window.innerHeight / defaultViewport.height;
-        const scale = Math.min(scaleX, scaleY, 2);
+        const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+        const cssScale = Math.min(scaleX, scaleY);
+        const viewport = page.getViewport({ scale: cssScale * pixelRatio });
+        const cssWidth = Math.floor(viewport.width / pixelRatio);
+        const cssHeight = Math.floor(viewport.height / pixelRatio);
+        const offscreen = document.createElement('canvas');
+        const offscreenCtx = offscreen.getContext('2d');
 
-        const viewport = page.getViewport({ scale });
+        offscreen.width = Math.floor(viewport.width);
+        offscreen.height = Math.floor(viewport.height);
+        offscreenCtx.fillStyle = '#fff';
+        offscreenCtx.fillRect(0, 0, offscreen.width, offscreen.height);
 
-        canvas.width = Math.floor(viewport.width);
-        canvas.height = Math.floor(viewport.height);
-        canvas.style.width = Math.floor(viewport.width) + 'px';
-        canvas.style.height = Math.floor(viewport.height) + 'px';
-
-        ctx.fillStyle = '#fff';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-        renderTask = page.render({
-          canvasContext: ctx,
+        await page.render({
+          canvasContext: offscreenCtx,
           viewport: viewport
-        });
+        }).promise;
 
-        await renderTask.promise;
-        renderTask = null;
+        if (renderGeneration !== generation) return null;
+
+        const source = window.createImageBitmap
+          ? await createImageBitmap(offscreen)
+          : offscreen;
+        const cached = {
+          pageNum,
+          source,
+          width: offscreen.width,
+          height: offscreen.height,
+          cssWidth,
+          cssHeight
+        };
+
+        pageCache.set(key, cached);
+        trimPageCache();
+        return cached;
+      })();
+
+      pendingRenders.set(key, renderPromise);
+
+      try {
+        return await renderPromise;
       } catch (e) {
         if (e.name !== 'RenderingCancelledException') {
           console.error('Render error:', e);
           alert('Error rendering page: ' + e.message);
         }
+        return null;
+      } finally {
+        pendingRenders.delete(key);
       }
     }
 
-    function showIndicator() {
-      pageIndicator.textContent = `Page ${currentPage} of ${totalPages}`;
-      pageIndicator.classList.add('visible');
-      clearTimeout(window.indicatorTimer);
-      window.indicatorTimer = setTimeout(() => {
-        pageIndicator.classList.remove('visible');
-      }, 2000);
+    function drawCachedPage(cached) {
+      if (!cached) return;
+
+      canvas.width = cached.width;
+      canvas.height = cached.height;
+      canvas.style.width = cached.cssWidth + 'px';
+      canvas.style.height = cached.cssHeight + 'px';
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(cached.source, 0, 0);
+    }
+
+    async function renderPage(pageNum) {
+      const cached = await renderPageToCache(pageNum);
+      if (pageNum !== currentPage) return;
+
+      drawCachedPage(cached);
+      preRenderAdjacentPages();
+    }
+
+    function preRenderAdjacentPages() {
+      requestAnimationFrame(() => {
+        if (totalPages <= smallScorePageLimit) {
+          for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
+            if (pageNum !== currentPage) renderPageToCache(pageNum);
+          }
+          return;
+        }
+
+        [
+          currentPage + 1,
+          currentPage - 1,
+          currentPage + 2,
+          currentPage - 2,
+          currentPage + 3,
+          currentPage - 3
+        ].forEach(pageNum => renderPageToCache(pageNum));
+      });
+    }
+
+    function clearPageCache() {
+      generation++;
+
+      for (const cached of pageCache.values()) {
+        if (cached.source && cached.source.close) cached.source.close();
+      }
+      pageCache.clear();
+      pendingRenders.clear();
+    }
+
+    async function goToPage(pageNum) {
+      if (!pdfDoc || pageNum < 1 || pageNum > totalPages || pageNum === currentPage) return;
+
+      currentPage = pageNum;
+      const cached = pageCache.get(getCacheKey(currentPage));
+      if (cached) {
+        drawCachedPage(cached);
+        preRenderAdjacentPages();
+      } else {
+        renderPage(currentPage);
+      }
+      showIndicator();
     }
 
     function nextPage() {
       if (currentPage < totalPages) {
-        currentPage++;
-        renderPage(currentPage);
-        showIndicator();
+        goToPage(currentPage + 1);
       }
     }
 
     function prevPage() {
       if (currentPage > 1) {
-        currentPage--;
-        renderPage(currentPage);
-        showIndicator();
+        goToPage(currentPage - 1);
       }
     }
 
@@ -215,6 +315,7 @@
         pdfDoc = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
         totalPages = pdfDoc.numPages;
         currentPage = 1;
+        clearPageCache();
 
         await renderPage(currentPage);
         viewer.style.display = 'block';
@@ -265,6 +366,7 @@
     }
 
     function closeViewer() {
+      clearPageCache();
       viewer.style.display = 'none';
       closeBtn.classList.remove('visible');
       openScreen.style.display = 'flex';
@@ -286,7 +388,10 @@
     });
 
     window.addEventListener('resize', () => {
-      if (pdfDoc) renderPage(currentPage);
+      if (pdfDoc) {
+        clearPageCache();
+        renderPage(currentPage);
+      }
     });
   </script>
 </body>
