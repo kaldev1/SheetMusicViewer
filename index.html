@@ -332,6 +332,7 @@
 
     let touchStartX = 0;
     let moved = false;
+    let lastTouchTapTime = 0;
 
     canvas.addEventListener('touchstart', e => {
       if (e.touches.length === 1) {
@@ -347,10 +348,20 @@
     }, { passive: true });
 
     canvas.addEventListener('touchend', e => {
-      if (!moved) handleTap(e);
+      if (!moved) {
+        lastTouchTapTime = Date.now();
+        e.preventDefault();
+        handleTap(e);
+      }
     });
 
-    canvas.addEventListener('click', handleTap);
+    canvas.addEventListener('click', e => {
+      if (Date.now() - lastTouchTapTime < 700) {
+        e.preventDefault();
+        return;
+      }
+      handleTap(e);
+    });
 
     const closeBtn = document.getElementById('close-btn');
 
